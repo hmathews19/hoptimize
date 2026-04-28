@@ -55,37 +55,49 @@ for key, default in [
 # ─────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────
+def _parse_quarter_date(df: "pd.DataFrame") -> "pd.Series":
+    """Convert Year + Period (Q1-Q4) columns to a proper datetime.
+    Q1→Jan, Q2→Apr, Q3→Jul, Q4→Oct — real quarter start months.
+    Only rows with actual quarters (Q1-Q4) are parsed; others become NaT.
+    """
+    import pandas as pd
+    quarter_to_month = {"Q1": "01", "Q2": "04", "Q3": "07", "Q4": "10"}
+    month_str = df["Period"].map(quarter_to_month)
+    return pd.to_datetime(
+        df["Year"].astype(str) + "-" + month_str,
+        format="%Y-%m",
+        errors="coerce",
+    )
+
+
 def _load_market_context():
-    """Return last-8-quarters asking rent & vacancy for the Nashville W/D market."""
+    """Return last 12 quarters of asking rent & vacancy for the Nashville W/D market."""
     if not MARKET_DATA.exists():
         return None
     try:
         df = pd.read_excel(MARKET_DATA, sheet_name="Market Performance Trends")
         df = df[df["Sector"] == "Warehouse/Distribution"].copy()
-        df["date"] = pd.to_datetime(
-            df["Year"].astype(str) + "-" + df["Period"].str.replace("Q", ""),
-            format="%Y-%m",
-            errors="coerce",
-        )
+        df["date"] = _parse_quarter_date(df)
+        df = df.dropna(subset=["date", "Asking Rent/SF", "Vac %"])
         df = df.sort_values("date").tail(12)
-        return df[["date", "Asking Rent/SF", "Vac %"]].reset_index(drop=True)
+        # Format date as readable quarter label for the chart
+        df["quarter"] = df["date"].dt.strftime("%Y Q") + ((df["date"].dt.month - 1) // 3 + 1).astype(str)
+        return df[["quarter", "Asking Rent/SF", "Vac %"]].reset_index(drop=True)
     except Exception:
         return None
 
 
 def _load_transaction_context():
-    """Return last 8 quarters of median price/SF and cap rate."""
+    """Return last 12 quarters of median price/SF and cap rate."""
     if not MARKET_DATA.exists():
         return None
     try:
         df = pd.read_excel(MARKET_DATA, sheet_name="Market Transactions")
-        df["date"] = pd.to_datetime(
-            df["Year"].astype(str) + "-" + df["Period"].str.replace("Q", ""),
-            format="%Y-%m",
-            errors="coerce",
-        )
+        df["date"] = _parse_quarter_date(df)
+        df = df.dropna(subset=["date"])
         df = df.sort_values("date").tail(12)
-        return df[["date", "Median Sales Price Per SF", "Median Transaction Cap Rate"]].reset_index(drop=True)
+        df["quarter"] = df["date"].dt.strftime("%Y Q") + ((df["date"].dt.month - 1) // 3 + 1).astype(str)
+        return df[["quarter", "Median Sales Price Per SF", "Median Transaction Cap Rate"]].reset_index(drop=True)
     except Exception:
         return None
 
@@ -236,14 +248,16 @@ def step_upload():
     # Market context preview
     mkt = _load_market_context()
     if mkt is not None:
-        with st.expander("📊 Nashville W/D Market Context (last 12 quarters)", expanded=False):
+        with st.expander("📊 Nashville W/D Market Context (last 12 quarters)", expanded=True):
             col_a, col_b = st.columns(2)
             with col_a:
                 st.subheader("Asking Rent ($/SF NNN)")
-                st.line_chart(mkt.set_index("date")["Asking Rent/SF"])
+                st.line_chart(mkt.set_index("quarter")["Asking Rent/SF"])
             with col_b:
-                st.subheader("Vacancy Rate")
-                st.line_chart(mkt.set_index("date")["Vac %"])
+                st.subheader("Vacancy Rate (%)")
+                vac_pct = mkt[["quarter", "Vac %"]].copy()
+                vac_pct["Vac %"] = vac_pct["Vac %"] * 100
+                st.line_chart(vac_pct.set_index("quarter")["Vac %"])
 
 
 # ─────────────────────────────────────────────
