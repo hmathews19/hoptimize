@@ -1,6 +1,6 @@
-   streamlit
-   anthropic
-   openpyxl
-   pydantic
-   pandas
-   google-genai
+streamlit
+anthropic
+google-genai
+openpyxl
+pydantic
+pandas
