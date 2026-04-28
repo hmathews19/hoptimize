@@ -39,12 +39,10 @@ DEFAULT_ASSUMPTIONS = {
     "cam_psf": 0.40,
     "insurance_psf": 0.18,
     "real_estate_taxes_psf": 0.95,
-    "utilities_psf": 0.00,
-    "other_opex_psf": 0.00,
 }
 
 
-# Cell addresses on Assumptions tab (matches build_v2.py structure)
+# Cell addresses on Assumptions tab — matches Industrial_UW_Model_v3.xlsx
 # Keep this in sync with the template!
 ASSUMPTION_CELLS = {
     "property_name": "C6",
@@ -60,6 +58,7 @@ ASSUMPTION_CELLS = {
     # Rent growth row 42, columns D-M (years 1-10)
     "growth_start_col": 4,  # column D
     "growth_row": 42,
+    # Leasing assumptions
     "ti_new": "C47",
     "ti_ren": "C48",
     "lc_new": "C49",
@@ -67,18 +66,22 @@ ASSUMPTION_CELLS = {
     "free_rent_new": "C51",
     "free_rent_ren": "C52",
     "downtime_new": "C53",
+    "downtime_ren": "C54",    # v3: renewal downtime
+    "retention_ratio": "C55", # v3: retention ratio
+    "new_lease_term": "C56",  # v3: new lease term years
+    # Exit
     "exit_cap": "C34",
-    "cam": "C58",
-    "insurance": "C59",
-    "ret": "C60",
-    "mgmt_fee": "C61",
-    "expense_growth": "C62",
-    "gen_vac": "C63",
-    "capex_reserves": "C65",
-    # Utilities and other opex — add rows 66/67 in template to activate
-    "utilities": "C66",
-    "other_opex": "C67",
-    # Deal economics (Assumptions tab — Acquisition & Debt sections)
+    # Operating expenses — all shifted down 1 row vs v2
+    "cam": "C59",
+    "insurance": "C60",
+    "ret": "C61",
+    "utilities": "C62",       # v3: now official (was C66 in v2)
+    "mgmt_fee": "C63",
+    "expense_growth": "C64",
+    "gen_vac": "C65",
+    "expense_recovery": "C66", # v3: NNN recovery % (default 1.0)
+    "capex_reserves": "C67",
+    # Deal economics
     "purchase_price": "C18",
     "ltv": "C24",
     "interest_rate": "C25",
@@ -122,22 +125,21 @@ def populate_template(
     extraction: PropertyExtraction,
     template_path: Path,
     output_path: Path,
-    deal_economics: dict = None,
 ) -> PopulationResult:
     """
     Copy template to output_path and write extracted values into it.
-    deal_economics keys: purchase_price, ltv, interest_rate, amortization,
-                         io_years, loan_fee
     Returns a PopulationResult summarizing what was extracted vs. defaulted.
     """
     result = PopulationResult()
 
+    # Copy template to output location
     shutil.copy(template_path, output_path)
     wb = load_workbook(output_path)
 
+    # Populate Assumptions tab
     _populate_assumptions(wb, extraction, result)
-    if deal_economics:
-        _populate_deal_economics(wb, deal_economics)
+
+    # Populate Rent Roll tab
     _populate_rent_roll(wb, extraction, result)
 
     wb.save(output_path)
@@ -192,6 +194,10 @@ def _populate_assumptions(wb, extraction: PropertyExtraction, result: Population
     _set_with_default(ws, ASSUMPTION_CELLS["free_rent_new"], ba.free_rent_new_months, "free_rent_new_months", result)
     _set_with_default(ws, ASSUMPTION_CELLS["free_rent_ren"], ba.free_rent_renewal_months, "free_rent_renewal_months", result)
     _set_with_default(ws, ASSUMPTION_CELLS["downtime_new"], ba.downtime_new_months, "downtime_new_months", result)
+    # v3 new leasing cells — use sensible defaults if not in OM
+    ws[ASSUMPTION_CELLS["downtime_ren"]] = 0      # renewal downtime almost always 0
+    ws[ASSUMPTION_CELLS["retention_ratio"]] = 0.75
+    ws[ASSUMPTION_CELLS["new_lease_term"]] = 5
 
     # Exit cap
     _set_with_default(ws, ASSUMPTION_CELLS["exit_cap"], ba.exit_cap_rate, "exit_cap_rate", result)
@@ -200,33 +206,15 @@ def _populate_assumptions(wb, extraction: PropertyExtraction, result: Population
     _set_with_default(ws, ASSUMPTION_CELLS["cam"], ba.cam_psf, "cam_psf", result)
     _set_with_default(ws, ASSUMPTION_CELLS["insurance"], ba.insurance_psf, "insurance_psf", result)
     _set_with_default(ws, ASSUMPTION_CELLS["ret"], ba.real_estate_taxes_psf, "real_estate_taxes_psf", result)
+    # Utilities: write extracted value if present, else write 0 (not a default that needs flagging)
+    ws[ASSUMPTION_CELLS["utilities"]] = ba.utilities_psf or 0.0
+    if ba.utilities_psf:
+        result.mark_extracted("utilities_psf")
     _set_with_default(ws, ASSUMPTION_CELLS["mgmt_fee"], ba.mgmt_fee_pct, "mgmt_fee_pct", result)
     _set_with_default(ws, ASSUMPTION_CELLS["expense_growth"], ba.expense_growth_pct, "expense_growth_pct", result)
     _set_with_default(ws, ASSUMPTION_CELLS["gen_vac"], ba.general_vacancy_pct, "general_vacancy_pct", result)
+    ws[ASSUMPTION_CELLS["expense_recovery"]] = 1.0  # full NNN recovery — always true for this asset class
     _set_with_default(ws, ASSUMPTION_CELLS["capex_reserves"], ba.capex_reserves_psf, "capex_reserves_psf", result)
-    # Utilities and other opex (written if non-zero; template rows 66/67 optional)
-    if ba.utilities_psf:
-        ws[ASSUMPTION_CELLS["utilities"]] = ba.utilities_psf
-        result.mark_extracted("utilities_psf")
-    if ba.other_opex_psf:
-        ws[ASSUMPTION_CELLS["other_opex"]] = ba.other_opex_psf
-        result.mark_extracted("other_opex_psf")
-
-
-def _populate_deal_economics(wb, deal: dict):
-    """Write purchase price and debt terms to the Assumptions tab."""
-    ws = wb["Assumptions"]
-    mapping = {
-        "purchase_price": "purchase_price",
-        "ltv": "ltv",
-        "interest_rate": "interest_rate",
-        "amortization": "amortization",
-        "io_years": "io_years",
-        "loan_fee": "loan_fee",
-    }
-    for key, cell_key in mapping.items():
-        if key in deal and deal[key] is not None:
-            ws[ASSUMPTION_CELLS[cell_key]] = deal[key]
 
 
 def _populate_rent_roll(wb, extraction: PropertyExtraction, result: PopulationResult):
