@@ -161,7 +161,6 @@ def _populate_deal_economics(wb, deal: dict):
     for key, cell_key in field_to_cell.items():
         if deal.get(key) is not None:
             ws[ASSUMPTION_CELLS[cell_key]] = deal[key]
-    return result
 
 
 def _populate_assumptions(wb, extraction: PropertyExtraction, result: PopulationResult):
