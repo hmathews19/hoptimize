@@ -125,24 +125,42 @@ def populate_template(
     extraction: PropertyExtraction,
     template_path: Path,
     output_path: Path,
+    deal_economics: dict = None,
 ) -> PopulationResult:
     """
     Copy template to output_path and write extracted values into it.
+    deal_economics keys: purchase_price, ltv, interest_rate, amortization,
+                         io_years, loan_fee
     Returns a PopulationResult summarizing what was extracted vs. defaulted.
     """
     result = PopulationResult()
 
-    # Copy template to output location
     shutil.copy(template_path, output_path)
     wb = load_workbook(output_path)
 
-    # Populate Assumptions tab
     _populate_assumptions(wb, extraction, result)
-
-    # Populate Rent Roll tab
+    if deal_economics:
+        _populate_deal_economics(wb, deal_economics)
     _populate_rent_roll(wb, extraction, result)
 
     wb.save(output_path)
+    return result
+
+
+def _populate_deal_economics(wb, deal: dict):
+    """Write purchase price and debt terms to the Assumptions tab."""
+    ws = wb["Assumptions"]
+    field_to_cell = {
+        "purchase_price": "purchase_price",
+        "ltv":            "ltv",
+        "interest_rate":  "interest_rate",
+        "amortization":   "amortization",
+        "io_years":       "io_years",
+        "loan_fee":       "loan_fee",
+    }
+    for key, cell_key in field_to_cell.items():
+        if deal.get(key) is not None:
+            ws[ASSUMPTION_CELLS[cell_key]] = deal[key]
     return result
 
 
