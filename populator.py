@@ -263,10 +263,16 @@ def _populate_rent_roll(wb, extraction: PropertyExtraction, result: PopulationRe
         ws.cell(row=row, column=RENT_ROLL_COLS["suite"]).value = tenant.suite
         ws.cell(row=row, column=RENT_ROLL_COLS["name"]).value = tenant.name
         ws.cell(row=row, column=RENT_ROLL_COLS["sf"]).value = tenant.sf
-        if tenant.lease_start:
-            ws.cell(row=row, column=RENT_ROLL_COLS["lease_start"]).value = tenant.lease_start
-        if tenant.lease_end:
-            ws.cell(row=row, column=RENT_ROLL_COLS["lease_end"]).value = tenant.lease_end
+        is_vacant = tenant.name.upper().startswith("VACANT")
+        if is_vacant:
+            # Explicitly blank date cells — template example data must not bleed through
+            ws.cell(row=row, column=RENT_ROLL_COLS["lease_start"]).value = None
+            ws.cell(row=row, column=RENT_ROLL_COLS["lease_end"]).value = None
+        else:
+            if tenant.lease_start:
+                ws.cell(row=row, column=RENT_ROLL_COLS["lease_start"]).value = tenant.lease_start
+            if tenant.lease_end:
+                ws.cell(row=row, column=RENT_ROLL_COLS["lease_end"]).value = tenant.lease_end
         ws.cell(row=row, column=RENT_ROLL_COLS["rent_psf"]).value = tenant.current_rent_psf
         ws.cell(row=row, column=RENT_ROLL_COLS["esc"]).value = tenant.escalation_pct
         ws.cell(row=row, column=RENT_ROLL_COLS["recovery"]).value = tenant.recovery_type or "NNN"

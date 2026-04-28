@@ -172,12 +172,20 @@ def generate_report(
     lines.append(f"- Property info fields populated: {sum(1 for v in comp['property_info'].values() if v)}/{len(comp['property_info'])}")
     lines.append(f"- Market data section: {'✓' if comp['has_market_data'] else '✗'}")
     lines.append(f"- Broker assumptions section: {'✓' if comp['has_broker_assumptions'] else '✗'}")
-    if comp.get('broker_assumption_fields_populated'):
-        lines.append(f"- Broker assumption fields: {comp['broker_assumption_fields_populated']}/15 populated")
+    if comp.get('broker_assumption_fields_populated') is not None:
+        from schemas import BrokerAssumptions
+        total_ba_fields = len(BrokerAssumptions.model_fields)
+        lines.append(f"- Broker assumption fields: {comp['broker_assumption_fields_populated']}/{total_ba_fields} populated")
     lines.append(f"- Tenants extracted: {comp['num_tenants']}")
     lines.append(f"- Tenants with full lease dates: {comp['tenants_with_dates']}")
     lines.append(f"- Tenants with market rent assumption: {comp['tenants_with_market_rent']}")
     lines.append("")
+
+    # Market Context
+    market_context = _build_market_context(extraction, usage)
+    if market_context:
+        lines.append("")
+        lines.extend(market_context)
 
     # Footer
     lines.append("---")
@@ -195,3 +203,190 @@ def generate_report(
         Path(output_path).write_text(markdown, encoding="utf-8")
 
     return markdown
+
+
+# ─────────────────────────────────────────────────────────────
+# MARKET CONTEXT HELPERS
+# ─────────────────────────────────────────────────────────────
+
+def _load_market_data() -> tuple:
+    """
+    Load Nashville market data from om_market_data.xlsx if present next to this script,
+    or from Nashville_Industrial_Market.xlsx. Returns (perf_df, txn_df) or (None, None).
+    """
+    try:
+        import pandas as pd
+    except ImportError:
+        return None, None
+
+    # Search for the file relative to this script
+    search_paths = [
+        Path(__file__).parent / "Nashville_Industrial_Market.xlsx",
+        Path(__file__).parent / "om_market_data.xlsx",
+    ]
+    mkt_path = next((p for p in search_paths if p.exists()), None)
+    if mkt_path is None:
+        return None, None
+
+    try:
+        xl = pd.ExcelFile(mkt_path)
+        perf = xl.parse("Market Performance Trends")
+        txn  = xl.parse("Market Transactions")
+
+        # Filter to real quarters and W/D sector
+        q_mask = perf["Period"].isin(["Q1", "Q2", "Q3", "Q4"])
+        wd_perf = perf[(perf["Sector"] == "Warehouse/Distribution") & q_mask].copy()
+
+        q_mask_t = txn["Period"].isin(["Q1", "Q2", "Q3", "Q4"])
+        wd_txn  = txn[q_mask_t].copy()
+
+        return wd_perf, wd_txn
+    except Exception:
+        return None, None
+
+
+def _build_market_context(extraction, usage: dict = None) -> list:
+    """
+    Build markdown lines for a Market Context section comparing the deal to
+    recent Nashville W/D market data.
+    """
+    perf_df, txn_df = _load_market_data()
+    if perf_df is None or txn_df is None:
+        return []
+
+    pi = extraction.property_info
+    ba = extraction.broker_assumptions
+    tenants = extraction.tenants
+
+    lines = []
+    lines.append("## Market Context")
+    lines.append("")
+    lines.append("*Based on Nashville Warehouse/Distribution market data. "
+                 "Transaction comps skew toward larger assets — interpret price/SF and cap rate "
+                 "comparisons with that in mind for sub-200K SF properties.*")
+    lines.append("")
+
+    # ── Last 4 quarters of performance data ──
+    last4_perf = perf_df.tail(4)
+    latest_perf = perf_df.iloc[-1]
+    avg_asking  = last4_perf["Asking Rent/SF"].mean()
+    avg_eff     = last4_perf["Effective Rent/SF"].mean()
+    avg_vac     = last4_perf["Vac %"].mean()
+    latest_qtr  = f"{int(latest_perf['Year'])} {latest_perf['Period']}"
+
+    # ── Last 4 quarters of transaction data ──
+    txn_valid = txn_df.dropna(subset=["Median Sales Price Per SF", "Median Transaction Cap Rate"])
+    last4_txn  = txn_valid.tail(4)
+    median_psf = last4_txn["Median Sales Price Per SF"].median()
+    median_cap = last4_txn["Median Transaction Cap Rate"].median()
+    latest_txn = txn_df.iloc[-1]
+    txn_qtr    = f"{int(latest_txn['Year'])} {latest_txn['Period']}"
+
+    # ── In-place rent ──
+    occupied = [t for t in tenants if not t.name.upper().startswith("VACANT")]
+    if occupied:
+        total_occ_sf = sum(t.sf for t in occupied)
+        in_place_wt  = sum(t.current_rent_psf * t.sf for t in occupied) / total_occ_sf
+    else:
+        in_place_wt = None
+
+    # ── Rent comparison ──
+    lines.append("### Rent")
+    lines.append("")
+    lines.append(f"| Metric | This Deal | Market (4Q avg, {latest_qtr}) | Spread |")
+    lines.append("|---|---:|---:|---:|")
+    if in_place_wt is not None:
+        spread_inplace = in_place_wt - avg_asking
+        indicator = "🟢" if spread_inplace >= 0 else "🔴"
+        lines.append(f"| In-Place Rent (wtd avg) | ${in_place_wt:.2f}/SF | ${avg_asking:.2f}/SF | "
+                     f"{indicator} {spread_inplace:+.2f}/SF |")
+    if ba and ba.market_rent_y1_psf:
+        spread_mkt = ba.market_rent_y1_psf - avg_asking
+        indicator = "🟢" if spread_mkt >= 0 else "🔴"
+        lines.append(f"| Broker Market Rent Assumption | ${ba.market_rent_y1_psf:.2f}/SF | "
+                     f"${avg_asking:.2f}/SF | {indicator} {spread_mkt:+.2f}/SF |")
+        lines.append(f"| Effective Rent (market) | — | ${avg_eff:.2f}/SF | — |")
+    lines.append("")
+
+    # ── Vacancy context ──
+    prop_vac = 1.0 - (sum(t.sf for t in occupied) / pi.total_sf) if occupied else None
+    lines.append("### Vacancy")
+    lines.append("")
+    lines.append(f"| Metric | This Property | Market (4Q avg) |")
+    lines.append("|---|---:|---:|")
+    if prop_vac is not None:
+        vac_indicator = "🟢" if prop_vac <= avg_vac else "🔴"
+        lines.append(f"| Vacancy Rate | {vac_indicator} {prop_vac*100:.1f}% | {avg_vac*100:.1f}% |")
+    lines.append("")
+
+    # ── Pricing & cap rate ──
+    lines.append(f"### Pricing & Cap Rate *(4Q median as of {txn_qtr})*")
+    lines.append("")
+    lines.append("| Metric | Deal Input | Market Median | Note |")
+    lines.append("|---|---:|---:|---|")
+    if usage and usage.get("purchase_price_psf"):
+        pp_psf = usage["purchase_price_psf"]
+        pp_indicator = "🟢" if pp_psf <= median_psf else "🔴"
+        lines.append(f"| Purchase Price/SF | {pp_indicator} ${pp_psf:.0f} | ${median_psf:.0f} | "
+                     f"{'Below' if pp_psf <= median_psf else 'Above'} market median |")
+    else:
+        lines.append(f"| Market Median Price/SF | — | ${median_psf:.0f} | Set price in app to compare |")
+
+    if ba and ba.exit_cap_rate:
+        cap_indicator = "🟢" if ba.exit_cap_rate >= median_cap else "🔴"
+        lines.append(f"| Exit Cap Rate | {cap_indicator} {ba.exit_cap_rate*100:.2f}% | "
+                     f"{median_cap*100:.2f}% | "
+                     f"{'Conservative (higher = safer)' if ba.exit_cap_rate >= median_cap else 'Aggressive (below market median)'} |")
+    lines.append("")
+
+    # ── Rent growth context ──
+    if len(perf_df) >= 8:
+        recent8  = perf_df.tail(8)
+        rent_chg = (recent8["Asking Rent/SF"].iloc[-1] / recent8["Asking Rent/SF"].iloc[0] - 1)
+        yoy_avg  = perf_df.tail(4)["Asking Rent % Chg"].mean()
+        lines.append("### Rent Growth Context")
+        lines.append("")
+        lines.append(f"- Nashville W/D asking rent change over last 8 quarters: "
+                     f"**{rent_chg*100:+.1f}%** "
+                     f"(${recent8['Asking Rent/SF'].iloc[0]:.2f} → ${recent8['Asking Rent/SF'].iloc[-1]:.2f}/SF)")
+        if not (yoy_avg != yoy_avg):  # NaN check
+            lines.append(f"- Average YoY rent growth (last 4Q): **{yoy_avg*100:.1f}%**")
+        if ba and ba.rent_growth_schedule:
+            broker_avg = sum(ba.rent_growth_schedule[:4]) / 4
+            lines.append(f"- Broker's modeled rent growth (Yr 1-4 avg): "
+                         f"**{broker_avg*100:.1f}%/yr**")
+        lines.append("")
+
+    # ── Key flags ──
+    flags = []
+    if ba and ba.market_rent_y1_psf and in_place_wt:
+        mtm_pct = (ba.market_rent_y1_psf / in_place_wt - 1) if in_place_wt > 0 else 0
+        if mtm_pct > 0.25:
+            flags.append(f"⚠️ **Mark-to-market upside of {mtm_pct*100:.0f}%** — "
+                         f"significant NOI growth potential on rollover, but execution risk if market softens.")
+        elif mtm_pct < -0.1:
+            flags.append(f"⚠️ **In-place rents above market by {abs(mtm_pct)*100:.0f}%** — "
+                         f"rollover risk; NOI may decline at lease expiration.")
+    if extraction.extraction_notes and any(k in extraction.extraction_notes.lower()
+                                           for k in ["bankruptcy", "ccaa", "distress", "chapter 15"]):
+        flags.append("🔴 **Seller distress / court approval required** — "
+                     "flag elevated execution risk and potential timeline uncertainty.")
+    vacant_pct = sum(t.sf for t in tenants if t.name.upper().startswith("VACANT")) / pi.total_sf if pi.total_sf else 0
+    if vacant_pct > 0.10:
+        flags.append(f"⚠️ **{vacant_pct*100:.0f}% vacant** — lease-up assumption is a key value driver; "
+                     f"stress-test downtime and market rent assumptions.")
+    near_term = [t for t in occupied if t.lease_end and
+                 (t.lease_end.year - date.today().year) * 12 + (t.lease_end.month - date.today().month) < 24]
+    if near_term:
+        near_sf = sum(t.sf for t in near_term)
+        flags.append(f"⚠️ **{near_sf:,} SF ({near_sf/pi.total_sf*100:.0f}% of property) expires within 24 months** — "
+                     f"near-term rollover risk; retention probability is key.")
+    if flags:
+        lines.append("### Deal Flags")
+        lines.append("")
+        for f in flags:
+            lines.append(f"- {f}")
+        lines.append("")
+
+    return lines
+
