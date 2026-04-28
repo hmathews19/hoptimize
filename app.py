@@ -347,7 +347,7 @@ def step_review():
             txn_ref = ""
             if txn is not None and not txn.empty:
                 last = txn.dropna(subset=["Median Sales Price Per SF"]).iloc[-1]
-                txn_ref = f"  *(market median: ${last['Median Sales Price Per SF']:.0f}/SF, {last['date'].strftime('%Y Q%q') if hasattr(last['date'], 'quarter') else last['date'].strftime('%Y')})*"
+                txn_ref = f"  *(market median: ${last['Median Sales Price Per SF']:.0f}/SF, {last['quarter']})*"
 
             price_psf = st.number_input(
                 f"Purchase Price ($/SF){txn_ref}", min_value=10.0, max_value=500.0,
